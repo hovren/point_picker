@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <vector>
+#include <string>
 
 #include <boost/thread/thread.hpp>
 #include <pcl/common/common_headers.h>
@@ -19,179 +20,266 @@
 
 typedef pcl::PointCloud<pcl::PointXYZ> cloud_t;
 typedef pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr_t;
+typedef pcl::PolygonMesh mesh_t;
+typedef pcl::PolygonMesh::Ptr mesh_ptr_t;
+typedef pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> color_t;
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_1_ptr;
-pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_2_ptr;
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr reg_cloud_1_ptr(new pcl::PointCloud<pcl::PointXYZ>);
-pcl::PointCloud<pcl::PointXYZ>::Ptr reg_cloud_2_ptr(new pcl::PointCloud<pcl::PointXYZ>);
+class KinfuResultData {
+public:
+	KinfuResultData(std::string prefix);
+	bool loadDirectory(std::string directory);
+    cloud_ptr_t getCloud();
+    std::string getPrefix();
+    void transformMesh(Eigen::Matrix4f T);
+    mesh_ptr_t getTransformedMesh();
+    void setBaseColor(float r, float g, float b);
+    pcl::RGB getBaseColor();
+private:
+    bool loadPointCloud(std::string directory);
+    bool loadMesh(std::string directory);
+    std::string m_prefix;
+	cloud_ptr_t m_cloud;
+	mesh_ptr_t m_mesh;
+//	mesh_ptr_t m_transformed_mesh;
+	std::string m_directory;
+	pcl::RGB m_base_color;
+};
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_1_transformed_ptr(new pcl::PointCloud<pcl::PointXYZ>);
-
-pcl::KdTreeFLANN<pcl::PointXYZ> kdtree_1;
-pcl::KdTreeFLANN<pcl::PointXYZ> kdtree_2;
-
-int reg_steps = 0;
-const int num_reg_steps = 3; // 3
-Eigen::Matrix4f reg_transform;
-
-boost::shared_ptr<pcl::visualization::PCLVisualizer> visualizer;
-
-enum {NONE, EXTRACT_PLANE, ICP} pick_mode = NONE;
-
-void
-printUsage (const char* progName)
-{
-  std::cout << "\n\nUsage: "<<progName<<" [options]\n\n"
-            << "\n\n";
+KinfuResultData::KinfuResultData(std::string prefix) :
+		m_prefix(prefix),
+		m_cloud(new cloud_t),
+		m_mesh(new mesh_t) {
+	// Set default color to white
+	m_base_color.r = m_base_color.g = m_base_color.b = 255;
 }
 
+void KinfuResultData::setBaseColor(float r, float g, float b) {
+	m_base_color.r = (uint8_t) r * 255;
+	m_base_color.g = (uint8_t) g * 255;
+	m_base_color.b = (uint8_t) b * 255;
+}
 
-void
-searchPointsAndAddToRegCloud(float x, float y, float z, pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, pcl::KdTreeFLANN<pcl::PointXYZ>& kdtree, pcl::PointCloud<pcl::PointXYZ>::Ptr reg_cloud, float radius=0.1)
-{
-	pcl::PointXYZ searchPoint;
-	searchPoint.x = x;
-	searchPoint.y = y;
-	searchPoint.z = z;
-	std::vector<int> indiceList;
-	std::vector<float> distanceList;
+pcl::RGB KinfuResultData::getBaseColor() {
+	return m_base_color;
+}
 
-	kdtree.radiusSearch(searchPoint, radius, indiceList, distanceList);
-	std::cout << "Found " << indiceList.size() << " points" << std::endl;
+cloud_ptr_t KinfuResultData::getCloud() {
+	return m_cloud;
+}
 
-	for (int i=0; i < indiceList.size(); ++i) {
-		reg_cloud->push_back(cloud->at(indiceList[i]));
+std::string KinfuResultData::getPrefix() {
+	return m_prefix;
+}
+
+void KinfuResultData::transformMesh(Eigen::Matrix4f transform) {
+	cloud_t tmp_cloud;
+	cloud_t transformed_cloud;
+
+	pcl::fromROSMsg(m_mesh->cloud, tmp_cloud);
+	pcl::transformPointCloud(tmp_cloud, transformed_cloud, transform);
+	pcl::toROSMsg(transformed_cloud, m_mesh->cloud);
+}
+
+mesh_ptr_t KinfuResultData::getTransformedMesh() {
+	return m_mesh;
+}
+
+bool KinfuResultData::loadPointCloud(std::string directory) {
+	std::string filename = directory + "/cloud_bin.pcd";
+	std::cout << "Loading pointcloud from " << filename << std::endl;
+
+	if (pcl::io::loadPCDFile<pcl::PointXYZ>(filename, *m_cloud) == -1) {
+		PCL_ERROR("Couldn't read cloud file %s\n", filename.c_str());
+		return false;
+	}
+
+	std::cout << "Cloud contained " << m_cloud->size() << " points." << std::endl;
+
+	return true;
+}
+
+bool KinfuResultData::loadMesh(std::string directory) {
+	std::string filename = directory + "mesh.ply";
+
+	if (pcl::io::loadPolygonFile(filename, *m_mesh) == -1) //* load the file
+			{
+		PCL_ERROR("Couldn't read mesh file %s\n", filename.c_str());
+		return false;
+	}
+	std::cout << "Loaded mesh from " << filename << std::endl;
+
+	return true;
+}
+
+bool KinfuResultData::loadDirectory(std::string directory) {
+	loadPointCloud(directory);
+	loadMesh(directory);
+	return true;
+}
+
+class KinfuResultVisualizer {
+public:
+	KinfuResultVisualizer();
+	bool loadData(std::string original_dir, std::string rectified_dir);
+	void start(void);
+private:
+	// Methods
+	void setup();
+	bool addCloudFromData(KinfuResultData& data);
+	bool addMeshFromData(KinfuResultData& data);
+	void keyboardCallback(const pcl::visualization::KeyboardEvent& event, void* cookie);
+	void pointPickCallback(const pcl::visualization::PointPickingEvent& event, void*);
+	void setPickEnabled(bool enabled);
+	void alignMeshes(); // Requires points to have been picked first
+
+	void enableClouds(bool enable);
+	void enableMeshes(bool enable);
+
+	// Variables
+	bool m_pick_enabled;
+	bool m_clouds_enabled;
+	bool m_meshes_enabled;
+	pcl::visualization::PCLVisualizer m_visualizer;
+	KinfuResultData m_original_data;
+	KinfuResultData m_rectified_data;
+	std::vector<pcl::PointXYZ> m_registration_points;
+};
+
+KinfuResultVisualizer::KinfuResultVisualizer() :
+		m_visualizer("Visualizer"),
+		m_original_data("Original"),
+		m_rectified_data("Rectified"),
+		m_pick_enabled(false),
+		m_clouds_enabled(false),
+		m_meshes_enabled(false) {
+	setPickEnabled(false);
+}
+
+void KinfuResultVisualizer::enableClouds(bool enabled) {
+	if (enabled == m_clouds_enabled) {
+		return;
+	}
+
+	m_clouds_enabled = enabled;
+
+	if (m_clouds_enabled) {
+		addCloudFromData(m_original_data);
+		addCloudFromData(m_rectified_data);
+	}
+	else {
+		std::cout << "removing point clouds" << std::endl;
+		m_visualizer.removePointCloud(m_original_data.getPrefix() + " cloud");
+		m_visualizer.removePointCloud(m_rectified_data.getPrefix() + " cloud");
 	}
 }
 
-void
-registration(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud1, pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud2)
-{
-	pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
-	icp.setInputCloud(cloud1);
-	icp.setInputTarget(cloud2);
+void KinfuResultVisualizer::enableMeshes(bool enabled) {
+	if (enabled == m_meshes_enabled) {
+		return;
+	}
 
-	pcl::PointCloud<pcl::PointXYZ> alignedCloud;
-	icp.align(alignedCloud);
+	m_meshes_enabled = enabled;
 
-	std::cout << "has converged:" << icp.hasConverged() << " score: "
-			<< icp.getFitnessScore() << std::endl;
-	std::cout << icp.getFinalTransformation() << std::endl;
-
-	reg_transform = icp.getFinalTransformation();
-
-	pcl::transformPointCloud(*cloud_1_ptr, *cloud_1_transformed_ptr, reg_transform);
-
-	std::cout << "Size of input cloud: " << cloud1->size() << " size of output cloud: " << cloud_1_transformed_ptr->size() << std::endl;
-	std::cout << "Showing transformed cloud instead of Cloud #1" << std::endl;
-
-	pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> pc1tr_color(cloud_1_transformed_ptr, 255, 255, 0); // yellow
-	visualizer->addPointCloud<pcl::PointXYZ> (cloud_1_transformed_ptr, pc1tr_color, "Cloud #1 transformed");
-
-	visualizer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "Cloud #1 transformed");
-	visualizer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, 0.5, "Cloud #1 transformed");
-	//visualizer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, 0.0, "Cloud #1");
-}
-
-void
-addToRegistration(float x, float y, float z)
-{
-
-	if (reg_steps < num_reg_steps) {
-		searchPointsAndAddToRegCloud(x, y, z, cloud_1_ptr, kdtree_1, reg_cloud_1_ptr);
-		searchPointsAndAddToRegCloud(x, y, z, cloud_2_ptr, kdtree_2, reg_cloud_2_ptr);
-
-		reg_steps++;
-
-		if (reg_steps == num_reg_steps) {
-			std::cout << "Performing registration" << std::endl;
-			std::cout << "Cloud #1 (reg): " << reg_cloud_1_ptr->size() << std::endl;
-			std::cout << "Cloud #2 (reg): " << reg_cloud_2_ptr->size() << std::endl;
-
-			visualizer->updatePointCloud(reg_cloud_1_ptr, "RegCloud #1");
-			visualizer->updatePointCloud(reg_cloud_2_ptr, "RegCloud #2");
-
-			registration(reg_cloud_1_ptr, reg_cloud_2_ptr);
-		}
+	if (m_meshes_enabled) {
+		addMeshFromData(m_original_data);
+		addMeshFromData(m_rectified_data);
+//		m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_REPRESENTATION,
+//				pcl::visualization::PCL_VISUALIZER_REPRESENTATION_WIREFRAME,
+//				m_original_data.getPrefix() + " mesh");
+	}
+	else {
+		std::cout << "Removing meshes" << std::endl;
+		m_visualizer.removePolygonMesh(m_original_data.getPrefix() + " mesh");
+		m_visualizer.removePolygonMesh(m_rectified_data.getPrefix() + " mesh");
 	}
 }
 
+void KinfuResultVisualizer::setPickEnabled(bool enabled) {
+	if (m_pick_enabled == enabled) {
+		return; // Do nothing
+	}
 
-/*void
-ransacPlane(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud)
-{
-	pcl::SampleConsensusModelPlane<pcl::PointXYZ> planeModel(cloud);
-	pcl::RandomSampleConsensus<pcl::PointXYZ> ransac(planeModel);
-	ransac.setDistanceThreshold(0.01);
-	ransac.computeModel();
-	Eigen::VectorXf plane_coeff;
-	ransac.getModelCoefficients(plane_coeff);
-	std::cout << "Plane coeffs: " << plane_coeff << std::endl;
+	m_pick_enabled = enabled;
+
+	if (m_pick_enabled) {
+		// Reset previous picks
+		m_registration_points.clear();
+	}
 }
 
-void
-alignGroundPlanes(float x, float y, float z)
-{
+bool KinfuResultVisualizer::loadData(std::string original_dir,
+		std::string rectified_dir) {
+	// Original data
+	m_original_data.loadDirectory(original_dir);
+	m_original_data.setBaseColor(0.0, 1.0, 0.0); // Green
+	//this->addCloudFromData(m_original_data);
 
-	float radius = 0.15;
-	searchPointsAndAddToRegCloud(x, y, z, cloud_1_ptr, kdtree_1, reg_cloud_1_ptr, radius);
-	searchPointsAndAddToRegCloud(x, y, z, cloud_2_ptr, kdtree_2, reg_cloud_2_ptr, radius);
-
-	ransacPlane(reg_cloud_1_ptr);
-	ransacPlane(reg_cloud_2_ptr);
-
-	reg_cloud_1_ptr->clear();
-	reg_cloud_2_ptr->clear();
-}*/
-
-void toggleCloud(const char* cloud_id)
-{
-	double opacity;
-	visualizer->getPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, opacity, cloud_id);
-	visualizer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, opacity > 0 ? 0.0 : 0.5, cloud_id);
+	// Rectified data
+	m_rectified_data.loadDirectory(rectified_dir);
+	m_rectified_data.setBaseColor(1.0, 0.0, 0.0); // Red
+	//this->addCloudFromData(m_rectified_data);
 }
 
-void keyboardCallback(const pcl::visualization::KeyboardEvent& event)
+bool KinfuResultVisualizer::addCloudFromData(KinfuResultData& data) {
+	std::string cloud_name = data.getPrefix() + " cloud";
+	std::cout << "Adding point cloud " << cloud_name << std::endl;
+	pcl::RGB rgb_color = data.getBaseColor();
+	m_visualizer.addPointCloud(data.getCloud(), cloud_name);
+	m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR,
+			rgb_color.r / 255.0, rgb_color.g / 255.0, rgb_color.b / 255.0, cloud_name);
+}
+
+bool KinfuResultVisualizer::addMeshFromData(KinfuResultData& data) {
+	std::string mesh_name = data.getPrefix() + " mesh";
+	std::cout << "Adding mesh " << mesh_name << std::endl;
+	pcl::RGB rgb_color = data.getBaseColor();
+
+	m_visualizer.addPolygonMesh(*data.getTransformedMesh(), mesh_name);
+	m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR,
+			rgb_color.r / 255.0, rgb_color.g / 255.0, rgb_color.b / 255.0, mesh_name);
+	//m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_OPACITY,
+	//			0.9, mesh_name);
+}
+
+void KinfuResultVisualizer::setup() {
+	m_visualizer.registerKeyboardCallback(&KinfuResultVisualizer::keyboardCallback, *this);
+	m_visualizer.registerPointPickingCallback(&KinfuResultVisualizer::pointPickCallback, *this);
+}
+
+void KinfuResultVisualizer::start() {
+	setup();
+	enableClouds(true);
+	while (!m_visualizer.wasStopped()) {
+		m_visualizer.spinOnce(100);
+		boost::this_thread::sleep(boost::posix_time::microseconds(100000));
+	}
+
+}
+
+void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardEvent& event, void* cookie)
 {
 	char keycode = event.getKeyCode();
-
-	double opacity;
 
 	if (event.keyUp()) {
 		switch (keycode) {
 		case 't':
-			if (reg_steps > 0) {
-				reg_steps = 0;
-				reg_cloud_1_ptr->clear();
-				reg_cloud_2_ptr->clear();
-				std::cout << "Resetting previously picked points" << std::endl;
-			}
-			pick_mode = ICP;
+			setPickEnabled(true);
 			break;
-		case 'j':
-			std::cout << "Registration using all points ICP" << std::endl;
-			registration(cloud_1_ptr, cloud_2_ptr);
-			break;
-		case 'p':
-			pick_mode = EXTRACT_PLANE;
-			std::cout << "RANSAC plane extraction mode" << std::endl;
+		case 'a':
+			alignMeshes();
+			setPickEnabled(false); // Cleans up after registration
 			break;
 		case '1':
-			toggleCloud("Cloud #1");
+			enableClouds(!m_clouds_enabled);
 			break;
 		case '2':
-			toggleCloud("Cloud #2");
+			enableMeshes(!m_meshes_enabled);
 			break;
-		case '3':
-			toggleCloud("Cloud #1 transformed");
-			break;
-		case '4':
-			toggleCloud("RegCloud #1");
-			break;
-		case '5':
-			toggleCloud("RegCloud #2");
-			break;
+		case 27: // ESC
+			std::cout << "User exited application" << std::endl;
+			m_visualizer.close();
+		break;
 		default:
 			break;
 		}
@@ -199,114 +287,88 @@ void keyboardCallback(const pcl::visualization::KeyboardEvent& event)
 
 }
 
-void
-pointPickCallback(const pcl::visualization::PointPickingEvent& event)
+void KinfuResultVisualizer::pointPickCallback(const pcl::visualization::PointPickingEvent& event, void*)
 {
 	float x,y,z;
 
-	if (pick_mode == NONE)
+	if (!m_pick_enabled) {
 		return;
-
-	event.getPoint(x, y, z);
-	std::cout << "Picked point (" << x << ", " << y << ", " << z << ")" << std::endl;
-
-	switch (pick_mode) {
-	case ICP:
-		addToRegistration(x, y, z);
-		break;
-	case EXTRACT_PLANE:
-		//alignGroundPlanes(x, y, z);
-		break;
 	}
 
+	event.getPoint(x, y, z);
+	std::cout << "Picked point #" << m_registration_points.size()  + 1 <<
+			"(" << x << ", " << y << ", " << z << ")" << std::endl;
+	pcl::PointXYZ point(x, y, z);
+	m_registration_points.push_back(point);
 }
 
-boost::shared_ptr<pcl::visualization::PCLVisualizer> dualPointCloudVis (pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud_1, pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud_2)
-{
-  // --------------------------------------------
-  // -----Open 3D viewer and add point cloud-----
-  // --------------------------------------------
-  boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("Dual viewer"));
-  viewer->setBackgroundColor (0, 0, 0);
-  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> pc1_color(cloud_1, 0, 255, 0); // green
-  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> pc2_color(cloud_2, 255, 0, 0); // red
-  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> pc1reg_color(reg_cloud_1_ptr, 0, 100, 0); // darker green
-  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> pc2reg_color(reg_cloud_2_ptr, 100, 0, 0); // darker red
+void KinfuResultVisualizer::alignMeshes() {
+	cloud_ptr_t orig_subcloud(new cloud_t);
+	cloud_ptr_t rect_subcloud(new cloud_t);
+	cloud_t alignedCloud;
+	cloud_ptr_t orig_cloud;
+	cloud_ptr_t rect_cloud;
+	pcl::KdTreeFLANN<pcl::PointXYZ> orig_kdtree;
+	pcl::KdTreeFLANN<pcl::PointXYZ> rect_kdtree;
+	Eigen::Matrix4f T; // Transform
 
-  viewer->addPointCloud<pcl::PointXYZ> (cloud_1, pc1_color, "Cloud #1");
-  viewer->addPointCloud<pcl::PointXYZ> (cloud_2, pc2_color, "Cloud #2");
-  viewer->addPointCloud<pcl::PointXYZ> (reg_cloud_1_ptr, pc1reg_color, "RegCloud #1");
-  viewer->addPointCloud<pcl::PointXYZ> (reg_cloud_2_ptr, pc2reg_color, "RegCloud #2");
+	double kdtree_search_radius = 0.1; // 1 dm
 
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "Cloud #1");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "Cloud #2");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "RegCloud #1");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "RegCloud #2");
+	if (m_registration_points.size() < 1) {
+		std::cout << "No registration points selected. Can not align meshes." << std::endl;
+		return;
+	}
 
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, 0.5, "Cloud #1");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, 0.5, "Cloud #2");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, 0.5, "RegCloud #1");
-  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_OPACITY, 0.5, "RegCloud #2");
+	std::cout << "Aligning clouds and meshes from " << m_registration_points.size() << " reference points" << std::endl;
+	// Create new point clouds from radius from selected points
+	orig_cloud = m_original_data.getCloud();
+	rect_cloud = m_rectified_data.getCloud();
+	orig_kdtree.setInputCloud(orig_cloud);
+	rect_kdtree.setInputCloud(rect_cloud);
+	std::vector<int> indiceList;
+	std::vector<float> distanceList;
+	for (int i=0; i < m_registration_points.size(); ++i) {
+		pcl::PointXYZ searchPoint = m_registration_points[i];
+		std::cout << "Point #" << i << ": " << searchPoint << std::endl;
 
-  viewer->registerKeyboardCallback(keyboardCallback);
-  viewer->registerPointPickingCallback(pointPickCallback);
+		// Search original cloud
+		indiceList.clear();
+		distanceList.clear();
+		orig_kdtree.radiusSearch(searchPoint, kdtree_search_radius, indiceList, distanceList);
+		std::cout << "\t Found " << indiceList.size() << " points in original cloud." <<std::endl;
+		for (int j=0; j < indiceList.size(); ++j) {
+			orig_subcloud->push_back(orig_cloud->at(indiceList[j]));
+		}
 
-  viewer->addCoordinateSystem (1.0);
-  viewer->initCameraParameters ();
-  return (viewer);
-}
+		// Cleanup and search rectified cloud
+		indiceList.clear();
+		distanceList.clear();
+		rect_kdtree.radiusSearch(searchPoint, kdtree_search_radius, indiceList, distanceList);
+		std::cout << "\t Found " << indiceList.size() << " points in rectified cloud." <<std::endl;
+		for (int j=0; j < indiceList.size(); ++j) {
+			rect_subcloud->push_back(rect_cloud->at(indiceList[j]));
+		}
+	}
 
-boost::shared_ptr<pcl::visualization::PCLVisualizer> dualMeshVis (pcl::PolygonMesh::ConstPtr mesh_1, pcl::PolygonMesh::ConstPtr mesh_2)
-{
-  // --------------------------------------------
-  // -----Open 3D viewer and add point cloud-----
-  // --------------------------------------------
-  boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("Dual Mesh viewer"));
-  viewer->setBackgroundColor (0, 0, 0);
+	// ICP
+	std::cout << "Running ICP. Orig subcloud: " << orig_subcloud->size() << " points, "
+			<< "Rectified subcloud: " << rect_subcloud->size() << std::endl;
 
-  viewer->addPolygonMesh(*mesh_1, "Mesh #1");
-  viewer->addPolygonMesh(*mesh_2, "Mesh #2");
+	pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+	icp.setInputCloud(orig_subcloud);
+	icp.setInputTarget(rect_subcloud);
+	icp.align(alignedCloud);
 
-  viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, 255, 0, 0, "Mesh #1");
-  viewer->setShapeRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, 0, 255, 0, "Mesh #2");
+	T = icp.getFinalTransformation();
 
-  viewer->addCoordinateSystem (1.0);
-  viewer->initCameraParameters ();
-  return (viewer);
-}
+	std::cout << "Final transform is: " << std::endl << T << std::endl;
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr
-loadCloud(char* filename)
-{
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+	// Transform original mesh
+	m_original_data.transformMesh(T);
 
-  if (pcl::io::loadPCDFile<pcl::PointXYZ> (filename, *cloud) == -1) //* load the file
-  {
-	PCL_ERROR ("Couldn't read cloud file %s\n", filename);
-	return cloud;
-  }
-  std::cout << "Loaded "
-			<< cloud->width * cloud->height
-			<< " data points from " << filename
-			<< std::endl;
-
-  return cloud;
-}
-
-pcl::PolygonMesh::Ptr
-loadMesh(char* filename)
-{
-  pcl::PolygonMesh::Ptr mesh(new pcl::PolygonMesh);
-
-  if (pcl::io::loadPolygonFile(filename, *mesh) == -1) //* load the file
-  {
-	PCL_ERROR ("Couldn't read mesh file %s\n", filename);
-	return mesh;
-  }
-  std::cout << "Loaded mesh from " << filename
-			<< std::endl;
-
-  return mesh;
+	// Turn off clouds, turn on meshes
+	enableClouds(false);
+	enableMeshes(true);
 }
 
 // --------------
@@ -315,39 +377,20 @@ loadMesh(char* filename)
 int
 main (int argc, char** argv)
 {
-  if (pcl::console::find_argument (argc, argv, "--mesh") >= 0) {
-	  pcl::PolygonMesh::Ptr mesh_1_ptr = loadMesh(argv[1]);
-	  pcl::PolygonMesh::Ptr mesh_2_ptr = loadMesh(argv[2]);
+	KinfuResultVisualizer visualizer;
+	std::string orig_dir(argv[1]);
+	std::string rect_dir;
 
-	  visualizer = dualMeshVis(mesh_1_ptr, mesh_2_ptr);
-  }
-  else {
-	  // ------------------------------------
-	  // ----- Load point clouds        -----
-	  // ------------------------------------
-	  cloud_1_ptr = loadCloud(argv[1]);
-	  cloud_2_ptr = loadCloud(argv[2]);
+	if (argc > 2) {
+		rect_dir = argv[2];
+	}
+	else {
+		rect_dir = orig_dir + "/result/";
+	}
 
-	  // Empty registration point clouds
-//	  reg_cloud_1_ptr = new pcl::PointCloud<pcl::PointXYZ>.makeShared();
-//	  reg_cloud_2_ptr = new pcl::PointCloud<pcl::PointXYZ>.makeShared();
+	visualizer.loadData(orig_dir, rect_dir);
 
-	  // Kd-trees of both clouds
-	  kdtree_1.setInputCloud(cloud_1_ptr);
-	  kdtree_2.setInputCloud(cloud_2_ptr);
-
-	  //viewer = simpleVis(basic_cloud_ptr);
-	  visualizer = dualPointCloudVis(cloud_1_ptr, cloud_2_ptr);
-  }
-
-  std::cout << argv[1] << " is green and " << argv[2] << " is red." << std::endl;
-
-  //--------------------
-  // -----Main loop-----
-  //--------------------
-  while (!visualizer->wasStopped ())
-  {
-    visualizer->spinOnce (100);
-    boost::this_thread::sleep (boost::posix_time::microseconds (100000));
-  }
+	visualizer.start();
 }
+
+
