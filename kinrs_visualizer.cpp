@@ -7,7 +7,6 @@
 
 #include <boost/thread/thread.hpp>
 #include <pcl/common/common_headers.h>
-#include <pcl/common/common_headers.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/io/vtk_lib_io.h>
@@ -17,6 +16,13 @@
 #include <pcl/registration/icp.h>
 #include <pcl/sample_consensus/ransac.h>
 #include <pcl/sample_consensus/sac_model_plane.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_types.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/features/normal_3d.h>
 
 typedef pcl::PointCloud<pcl::PointXYZ> cloud_t;
 typedef pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr_t;
@@ -100,8 +106,9 @@ bool KinfuResultData::loadPointCloud(std::string directory) {
 }
 
 bool KinfuResultData::loadMesh(std::string directory) {
-	std::string filename = directory + "mesh.ply";
+	std::string filename = directory + "/mesh.ply";
 
+	std::cout << "Loading mesh from " << filename << std::cout;
 	if (pcl::io::loadPolygonFile(filename, *m_mesh) == -1) //* load the file
 			{
 		PCL_ERROR("Couldn't read mesh file %s\n", filename.c_str());
@@ -132,6 +139,9 @@ private:
 	void pointPickCallback(const pcl::visualization::PointPickingEvent& event, void*);
 	void setPickEnabled(bool enabled);
 	void alignMeshes(); // Requires points to have been picked first
+	void estimatePlaneNormal(); // Requires picked points
+	void drawLineNormal(); // Requires picked points
+	void measureNormalDeviation(); // Requires picked points
 
 	void enableClouds(bool enable);
 	void enableMeshes(bool enable);
@@ -144,6 +154,7 @@ private:
 	KinfuResultData m_original_data;
 	KinfuResultData m_rectified_data;
 	std::vector<pcl::PointXYZ> m_registration_points;
+	pcl::Normal m_ground_normal;
 };
 
 KinfuResultVisualizer::KinfuResultVisualizer() :
@@ -270,6 +281,18 @@ void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardE
 			alignMeshes();
 			setPickEnabled(false); // Cleans up after registration
 			break;
+		case 'p':
+			estimatePlaneNormal();
+			setPickEnabled(false);
+			break;
+		case 'l':
+			drawLineNormal();
+			setPickEnabled(false);
+			break;
+		case 'k':
+			measureNormalDeviation();
+			setPickEnabled(false);
+			break;
 		case '1':
 			enableClouds(!m_clouds_enabled);
 			break;
@@ -290,14 +313,13 @@ void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardE
 void KinfuResultVisualizer::pointPickCallback(const pcl::visualization::PointPickingEvent& event, void*)
 {
 	float x,y,z;
-
+	event.getPoint(x, y, z);
+	std::cout << "Point = (" << x << ", " << y << ", " << z << ")" << std::endl;
 	if (!m_pick_enabled) {
 		return;
 	}
 
-	event.getPoint(x, y, z);
-	std::cout << "Picked point #" << m_registration_points.size()  + 1 <<
-			"(" << x << ", " << y << ", " << z << ")" << std::endl;
+	std::cout << "Stored point for later use" << std::endl;
 	pcl::PointXYZ point(x, y, z);
 	m_registration_points.push_back(point);
 }
@@ -369,6 +391,129 @@ void KinfuResultVisualizer::alignMeshes() {
 	// Turn off clouds, turn on meshes
 	enableClouds(false);
 	enableMeshes(true);
+}
+
+void KinfuResultVisualizer::estimatePlaneNormal() {
+	cloud_ptr_t orig_subcloud(new cloud_t);
+	cloud_ptr_t rect_subcloud(new cloud_t);
+	cloud_t alignedCloud;
+	cloud_ptr_t orig_cloud;
+	cloud_ptr_t rect_cloud;
+	pcl::KdTreeFLANN<pcl::PointXYZ> orig_kdtree;
+	pcl::KdTreeFLANN<pcl::PointXYZ> rect_kdtree;
+	Eigen::Matrix4f T; // Transform
+
+	double kdtree_search_radius = 0.1; // 1 dm
+
+	if (m_registration_points.size() < 1) {
+		std::cout << "No registration points selected. Can not align meshes." << std::endl;
+		return;
+	}
+
+	std::cout << "Estimating plane from " << m_registration_points.size() << " reference points" << std::endl;
+	// Get cloud from rectified mesh
+	cloud_t tmp_cloud;
+	pcl::fromROSMsg(m_rectified_data.getTransformedMesh()->cloud, tmp_cloud);
+
+	rect_kdtree.setInputCloud(tmp_cloud.makeShared());
+	std::vector<int> indiceList;
+	for (int i=0; i < m_registration_points.size(); ++i) {
+		pcl::PointXYZ searchPoint = m_registration_points[i];
+		std::cout << "Point #" << i << ": " << searchPoint << std::endl;
+
+		std::vector<int> _indiceList;
+		std::vector<float> distanceList;
+		rect_kdtree.radiusSearch(searchPoint, kdtree_search_radius, _indiceList, distanceList);
+		std::cout << "\t Found " << _indiceList.size() << " points in rectified cloud." <<std::endl;
+		indiceList.insert(indiceList.begin(), _indiceList.begin(), _indiceList.end());
+	}
+
+	pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normalEstimation;
+	float nx, ny, nz, curvature;
+	std::cout << "Computing normal from " << indiceList.size() << " points." << std::endl;
+	normalEstimation.computePointNormal(tmp_cloud, indiceList, nx, ny, nz, curvature);
+	std::cout << "Plane normal: (" << nx << ", " << ny << ", " << nz << ") with curvature " << curvature << std::endl;
+
+	m_ground_normal.normal_x = nx;
+	m_ground_normal.normal_y = ny;
+	m_ground_normal.normal_z = nz;
+}
+
+void KinfuResultVisualizer::drawLineNormal() {
+	if (m_registration_points.size() < 1) {
+		return;
+	}
+
+	pcl::PointXYZ p = m_registration_points.back(); // Last point
+	pcl::ModelCoefficients m;
+	m.values.push_back(p.x);
+	m.values.push_back(p.y);
+	m.values.push_back(p.z);
+	m.values.push_back(m_ground_normal.normal_x);
+	m.values.push_back(m_ground_normal.normal_y);
+	m.values.push_back(m_ground_normal.normal_z);
+
+	m_visualizer.removeShape(std::string("normal"));
+	m_visualizer.addLine(m, std::string("normal"));
+	std::cout << "Adding line" << std::endl;
+}
+
+void KinfuResultVisualizer::measureNormalDeviation() {
+	if (m_registration_points.size() < 3) {
+		return;
+	}
+
+	// Points
+	pcl::PointXYZ base_rect = m_registration_points[0];
+	pcl::PointXYZ top_rect = m_registration_points[1];
+	pcl::PointXYZ base_orig = m_registration_points[2];
+	pcl::PointXYZ top_orig = m_registration_points[3];
+
+	// Directions
+	Eigen::Vector3f base_top_rect(top_rect.x - base_rect.x, top_rect.y - base_rect.y, top_rect.z - base_rect.z);
+	Eigen::Vector3f base_top_orig(top_orig.x - base_orig.x, top_orig.y - base_orig.y, top_orig.z - base_orig.z);
+
+	Eigen::Vector3f normal(m_ground_normal.normal_x, m_ground_normal.normal_y, m_ground_normal.normal_z);
+
+	// Calculate angle to normal
+	normal.normalize();
+	base_top_rect.normalize();
+	base_top_orig.normalize();
+	float angle_rect_normal = acos(normal.dot(base_top_rect));
+	float angle_orig_normal = acos(normal.dot(base_top_orig));
+	std::cout << "Rectified, angle to normal: " << RAD2DEG(angle_rect_normal) << std::endl;
+	std::cout << "Original, angle to normal: " << RAD2DEG(angle_orig_normal) << std::endl;
+
+	struct {
+		pcl::PointXYZ p;
+		Eigen::Vector3f n;
+		std::string id;
+	} lines[2] = {
+			{base_rect, base_top_rect, "line_rect"},
+			{base_orig, base_top_orig, "line_orig"},
+	};
+
+	for (int i=0; i < 2; ++i) {
+		pcl::ModelCoefficients m;
+		m.values.push_back(lines[i].p.x);
+		m.values.push_back(lines[i].p.y);
+		m.values.push_back(lines[i].p.z);
+		m.values.push_back(lines[i].n[0]);
+		m.values.push_back(lines[i].n[1]);
+		m.values.push_back(lines[i].n[2]);
+
+		m_visualizer.removeShape(lines[i].id);
+		m_visualizer.addLine(m, lines[i].id);
+		std::cout << "Adding line " << lines[i].id << std::endl;
+		std::cout << "Coeffs: ";
+		for (int j=0; j < m.values.size(); ++j)
+			std::cout << m.values[j] << "  ";
+		std::cout << std::endl;
+
+	}
+
+	m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, 0.0, 0.0, 1.0, lines[0].id);
+	m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, 1.0, 0.0, 1.0, lines[1].id);
 }
 
 // --------------
