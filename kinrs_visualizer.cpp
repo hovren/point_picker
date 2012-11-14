@@ -459,7 +459,7 @@ void KinfuResultVisualizer::drawLineNormal() {
 }
 
 void KinfuResultVisualizer::measureNormalDeviation() {
-	if (m_registration_points.size() < 3) {
+	if (m_registration_points.size() < 6) {
 		return;
 	}
 
@@ -468,32 +468,47 @@ void KinfuResultVisualizer::measureNormalDeviation() {
 	pcl::PointXYZ top_rect = m_registration_points[1];
 	pcl::PointXYZ base_orig = m_registration_points[2];
 	pcl::PointXYZ top_orig = m_registration_points[3];
+	pcl::PointXYZ plane_1 = m_registration_points[4];
+	pcl::PointXYZ plane_2 = m_registration_points[5];
 
 	// Directions
 	Eigen::Vector3f base_top_rect(top_rect.x - base_rect.x, top_rect.y - base_rect.y, top_rect.z - base_rect.z);
 	Eigen::Vector3f base_top_orig(top_orig.x - base_orig.x, top_orig.y - base_orig.y, top_orig.z - base_orig.z);
 
+	Eigen::Vector3f v1(plane_2.x - plane_1.x, plane_2.y - plane_1.y, plane_2.z - plane_1.z);
 	Eigen::Vector3f normal(m_ground_normal.normal_x, m_ground_normal.normal_y, m_ground_normal.normal_z);
 
-	// Calculate angle to normal
+	// Project base_top_rect to lie in plane
+	v1.normalize();
 	normal.normalize();
+	Eigen::Vector3f plane_normal = v1.cross(normal);
+	base_top_rect = base_top_rect - plane_normal.dot(base_top_rect) * plane_normal;
+	base_top_orig = base_top_orig - plane_normal.dot(base_top_orig) * plane_normal;
+
+
+	// Calculate angle to normal
 	base_top_rect.normalize();
 	base_top_orig.normalize();
 	float angle_rect_normal = acos(normal.dot(base_top_rect));
 	float angle_orig_normal = acos(normal.dot(base_top_orig));
+	float angle_rect_orig = acos(base_top_rect.dot(base_top_orig));
+
 	std::cout << "Rectified, angle to normal: " << RAD2DEG(angle_rect_normal) << std::endl;
 	std::cout << "Original, angle to normal: " << RAD2DEG(angle_orig_normal) << std::endl;
+	std::cout << "Angle between rectified and original: " << RAD2DEG(angle_rect_orig) << std::endl;
+	std::cout << "Normal: " << normal << std::endl;
 
 	struct {
 		pcl::PointXYZ p;
 		Eigen::Vector3f n;
 		std::string id;
-	} lines[2] = {
+	} lines[3] = {
 			{base_rect, base_top_rect, "line_rect"},
 			{base_orig, base_top_orig, "line_orig"},
+			{plane_1, v1, "line_plane"}
 	};
 
-	for (int i=0; i < 2; ++i) {
+	for (int i=0; i < 3; ++i) {
 		pcl::ModelCoefficients m;
 		m.values.push_back(lines[i].p.x);
 		m.values.push_back(lines[i].p.y);
