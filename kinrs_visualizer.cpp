@@ -21,8 +21,9 @@
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
-#include <pcl/segmentation/sac_segmentation.h>
+//#include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/features/normal_3d.h>
+
 
 typedef pcl::PointCloud<pcl::PointXYZ> cloud_t;
 typedef pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr_t;
@@ -109,7 +110,7 @@ bool KinfuResultData::loadMesh(std::string directory) {
 	std::string filename = directory + "/mesh.ply";
 
 	std::cout << "Loading mesh from " << filename << std::cout;
-	if (pcl::io::loadPolygonFile(filename, *m_mesh) == -1) //* load the file
+	if (pcl::io::loadPolygonFilePLY(filename, *m_mesh) == -1) //* load the file
 			{
 		PCL_ERROR("Couldn't read mesh file %s\n", filename.c_str());
 		return false;
@@ -125,36 +126,48 @@ bool KinfuResultData::loadDirectory(std::string directory) {
 	return true;
 }
 
+enum DataFilter{
+	DATA_ORIGINAL = 0,
+	DATA_RECTIFIED = 1,
+	DATA_ALL,
+	DATA_NONE
+};
+
 class KinfuResultVisualizer {
 public:
 	KinfuResultVisualizer();
 	bool loadData(std::string original_dir, std::string rectified_dir);
 	void start(void);
+
 private:
 	// Methods
 	void setup();
 	bool addCloudFromData(KinfuResultData& data);
 	bool addMeshFromData(KinfuResultData& data);
 	void keyboardCallback(const pcl::visualization::KeyboardEvent& event, void* cookie);
+	void mouseCallback(const pcl::visualization::MouseEvent& event, void*);
 	void pointPickCallback(const pcl::visualization::PointPickingEvent& event, void*);
 	void setPickEnabled(bool enabled);
 	void alignMeshes(); // Requires points to have been picked first
 	void estimatePlaneNormal(); // Requires picked points
 	void drawLineNormal(); // Requires picked points
 	void measureNormalDeviation(); // Requires picked points
+    void measureBoxAngles(); // Requires picked points
 
-	void enableClouds(bool enable);
-	void enableMeshes(bool enable);
+	void toggleClouds(enum DataFilter cloud, bool enable);
+	void toggleMeshes(enum DataFilter mesh, bool enable);
 
 	// Variables
 	bool m_pick_enabled;
-	bool m_clouds_enabled;
-	bool m_meshes_enabled;
+	bool m_clouds_enabled[2];
+	bool m_meshes_enabled[2];
 	pcl::visualization::PCLVisualizer m_visualizer;
 	KinfuResultData m_original_data;
 	KinfuResultData m_rectified_data;
 	std::vector<pcl::PointXYZ> m_registration_points;
 	pcl::Normal m_ground_normal;
+	bool m_has_plane;
+	pcl::ModelCoefficients m_plane_coeff;
 };
 
 KinfuResultVisualizer::KinfuResultVisualizer() :
@@ -162,60 +175,83 @@ KinfuResultVisualizer::KinfuResultVisualizer() :
 		m_original_data("Original"),
 		m_rectified_data("Rectified"),
 		m_pick_enabled(false),
-		m_clouds_enabled(false),
-		m_meshes_enabled(false) {
+		m_has_plane(false) {
+
+	for (int i=0; i < 2; ++i) {
+		m_clouds_enabled[i] = false;
+		m_meshes_enabled[i] = false;
+	}
 	setPickEnabled(false);
 }
 
-void KinfuResultVisualizer::enableClouds(bool enabled) {
-	if (enabled == m_clouds_enabled) {
+void KinfuResultVisualizer::toggleClouds(enum DataFilter cloud, bool enable) {
+
+	bool new_state[2] = {m_clouds_enabled[0], m_clouds_enabled[1]};
+
+	switch (cloud) {
+	case DATA_ORIGINAL:
+	case DATA_RECTIFIED:
+		new_state[cloud] = enable; // yes, the enable variable has a horrible name
+		break;
+	case DATA_ALL:
+		for (int i=0; i < 2; ++i) {
+			new_state[i] = enable;
+		}
+		break;
+	default:
 		return;
 	}
 
-	m_clouds_enabled = enabled;
-
-	if (m_clouds_enabled) {
-		addCloudFromData(m_original_data);
-		addCloudFromData(m_rectified_data);
-	}
-	else {
-		std::cout << "removing point clouds" << std::endl;
-		m_visualizer.removePointCloud(m_original_data.getPrefix() + " cloud");
-		m_visualizer.removePointCloud(m_rectified_data.getPrefix() + " cloud");
+	// Toggle
+	for (int i=0; i < 2; ++i) {
+		if (new_state[i] != m_clouds_enabled[i]) {
+			bool enable = new_state[i];
+			KinfuResultData& instance = (i == DATA_ORIGINAL) ? m_original_data : m_rectified_data;
+			std::cout << (enable ? "Enabling" : "Disabling") <<
+					" point cloud \"" << instance.getPrefix() << " cloud\"" << std::endl;
+			if (enable) {
+				addCloudFromData(instance);
+			}
+			else {
+				m_visualizer.removePointCloud(instance.getPrefix() + " cloud");
+			}
+			m_clouds_enabled[i] = enable;
+		}
 	}
 }
 
-void KinfuResultVisualizer::enableMeshes(bool enabled) {
-	if (enabled == m_meshes_enabled) {
+void KinfuResultVisualizer::toggleMeshes(DataFilter mesh, bool enable) {
+	bool new_state[2] = {m_meshes_enabled[0], m_meshes_enabled[1]};
+
+	switch (mesh) {
+	case DATA_ORIGINAL:
+	case DATA_RECTIFIED:
+		new_state[mesh] = enable; // yes, the enable variable has a horrible name
+		break;
+	case DATA_ALL:
+		for (int i=0; i < 2; ++i) {
+			new_state[i] = enable;
+		}
+		break;
+	default:
 		return;
 	}
 
-	m_meshes_enabled = enabled;
-
-	if (m_meshes_enabled) {
-		addMeshFromData(m_original_data);
-		addMeshFromData(m_rectified_data);
-//		m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_REPRESENTATION,
-//				pcl::visualization::PCL_VISUALIZER_REPRESENTATION_WIREFRAME,
-//				m_original_data.getPrefix() + " mesh");
-	}
-	else {
-		std::cout << "Removing meshes" << std::endl;
-		m_visualizer.removePolygonMesh(m_original_data.getPrefix() + " mesh");
-		m_visualizer.removePolygonMesh(m_rectified_data.getPrefix() + " mesh");
-	}
-}
-
-void KinfuResultVisualizer::setPickEnabled(bool enabled) {
-	if (m_pick_enabled == enabled) {
-		return; // Do nothing
-	}
-
-	m_pick_enabled = enabled;
-
-	if (m_pick_enabled) {
-		// Reset previous picks
-		m_registration_points.clear();
+	// Toggle
+	for (int i=0; i < 2; ++i) {
+		if (new_state[i] != m_meshes_enabled[i]) {
+			bool enable = new_state[i];
+			KinfuResultData& instance = (i == DATA_ORIGINAL) ? m_original_data : m_rectified_data;
+			std::cout << (enable ? "Enabling" : "Disabling") <<
+					" mesh \"" << instance.getPrefix() << " mesh\"" << std::endl;
+			if (enable) {
+				addMeshFromData(instance);
+			}
+			else {
+				m_visualizer.removePolygonMesh(instance.getPrefix() + " mesh");
+			}
+			m_meshes_enabled[i] = enable;
+		}
 	}
 }
 
@@ -256,17 +292,32 @@ bool KinfuResultVisualizer::addMeshFromData(KinfuResultData& data) {
 void KinfuResultVisualizer::setup() {
 	m_visualizer.registerKeyboardCallback(&KinfuResultVisualizer::keyboardCallback, *this);
 	m_visualizer.registerPointPickingCallback(&KinfuResultVisualizer::pointPickCallback, *this);
+	m_visualizer.registerMouseCallback(&KinfuResultVisualizer::mouseCallback, *this);
 }
 
 void KinfuResultVisualizer::start() {
 	setup();
-	enableClouds(true);
+	toggleClouds(DATA_ALL, true);
 	while (!m_visualizer.wasStopped()) {
 		m_visualizer.spinOnce(100);
 		boost::this_thread::sleep(boost::posix_time::microseconds(100000));
 	}
 
 }
+
+void KinfuResultVisualizer::setPickEnabled(bool enabled) {
+        if (m_pick_enabled == enabled) {
+                return; // Do nothing
+        }
+
+        m_pick_enabled = enabled;
+
+        if (m_pick_enabled) {
+                // Reset previous picks
+                m_registration_points.clear();
+        }
+}
+
 
 void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardEvent& event, void* cookie)
 {
@@ -290,15 +341,44 @@ void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardE
 			setPickEnabled(false);
 			break;
 		case 'k':
-			measureNormalDeviation();
+			measureBoxAngles();
 			setPickEnabled(false);
 			break;
+			
+		case 'b':
+			m_visualizer.removeAllShapes();
+			setPickEnabled(false);
+			std::cout << "Clearing shapes" << std::cout;
+			break;
 		case '1':
-			enableClouds(!m_clouds_enabled);
+			toggleClouds(DATA_ALL, ! (m_clouds_enabled[0] && m_clouds_enabled[1]));
 			break;
 		case '2':
-			enableMeshes(!m_meshes_enabled);
+			toggleMeshes(DATA_ALL, ! (m_meshes_enabled[0] && m_meshes_enabled[1]));
 			break;
+		case '6':	
+		    if (m_meshes_enabled[DATA_ORIGINAL] == m_meshes_enabled[DATA_RECTIFIED])
+		    {
+		        toggleMeshes(DATA_ORIGINAL, ! m_meshes_enabled[DATA_ORIGINAL]);
+		    }
+		    else {
+		        toggleMeshes(DATA_ORIGINAL, ! m_meshes_enabled[DATA_ORIGINAL]);
+		        toggleMeshes(DATA_RECTIFIED, ! m_meshes_enabled[DATA_RECTIFIED]);
+		    }		    
+		    break;
+		case '7':
+			toggleClouds(DATA_ORIGINAL, ! m_clouds_enabled[DATA_ORIGINAL]);
+			break;
+		case '8':
+			toggleClouds(DATA_RECTIFIED, ! m_clouds_enabled[DATA_RECTIFIED]);
+			break;
+		case '9':
+			toggleMeshes(DATA_ORIGINAL, ! m_meshes_enabled[DATA_ORIGINAL]);
+			break;
+		case '0':
+			toggleMeshes(DATA_RECTIFIED, ! m_meshes_enabled[DATA_RECTIFIED]);
+			break;
+
 		case 27: // ESC
 			std::cout << "User exited application" << std::endl;
 			m_visualizer.close();
@@ -310,11 +390,79 @@ void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardE
 
 }
 
+void KinfuResultVisualizer::mouseCallback(const pcl::visualization::MouseEvent& event, void*)
+{
+    if (event.getType() != pcl::visualization::MouseEvent::MouseButtonRelease)
+        return;
+ 
+    if (!m_pick_enabled)
+        return;
+        
+    if (!m_has_plane)
+        return;    
+        
+    // Step 1: Get ray from camera to selected image coord
+    std::vector<pcl::visualization::Camera> cameras;
+    m_visualizer.getCameras(cameras);
+    pcl::visualization::Camera camera = cameras[0];
+    //vtk::vtkCamera vtkcam = camera.getCamera();
+    cout << "Camera matrix" << endl;
+    //cout << vtkcam.getRoll();
+    Eigen::Matrix4d projmat;
+    Eigen::Matrix4d viewmat;
+    camera.computeProjectionMatrix(projmat);
+    camera.computeViewMatrix(viewmat);
+    
+    Eigen::Matrix4d PV = projmat * viewmat;
+    Eigen::Matrix4d PVinv = PV.inverse();
+    
+    Eigen::Vector4d img_point;
+    img_point[0] = (2.0 * event.getX()) / camera.window_size[0] - 1.0;
+    img_point[1] = (2.0 * event.getY()) / camera.window_size[1] - 1.0;
+    img_point[2] = -1.0;
+    img_point[3] = 1.0;
+    
+    Eigen::Vector4d ray_eye = projmat.inverse() * img_point;
+    ray_eye[2] = -1.0;
+    ray_eye[3] = 0.0;
+    
+    Eigen::Vector4d ray_wor = viewmat.inverse() * ray_eye;
+    ray_wor.normalize();
+    
+    Eigen::Vector4d cam_pos(camera.pos[0], camera.pos[1], camera.pos[2], 1.0);
+    
+    Eigen::Vector4d other_point = cam_pos + 10.0 * ray_wor;
+    
+    //cout << "Homeogeneous image point " << img_point << endl;
+    
+    //Eigen::Vector4d world_point = PVinv*img_point;
+
+    pcl::PointXYZ p1(other_point[0], other_point[1], other_point[2]);
+    pcl::PointXYZ p2(cam_pos[0], cam_pos[1], cam_pos[2]);
+    
+    cout << "First point is " << p1 << "other point is " << p2 << endl;
+    
+    m_visualizer.addLine(p1, p2, "ray");
+    
+    // Step 2: Intersect with the plane
+    Eigen::Vector3d ray_dir(ray_wor[0], ray_wor[1], ray_wor[2]);
+    Eigen::Vector3d ray_start(cam_pos[0], cam_pos[1], cam_pos[2]);
+    Eigen::Vector3d plane_normal(m_plane_coeff.values[0], m_plane_coeff.values[1], m_plane_coeff.values[2]);
+    float d = m_plane_coeff.values[3];
+    
+    float t = - (d + plane_normal.dot(ray_start)) / plane_normal.dot(ray_dir);
+    Eigen::Vector3d intersection = ray_start + ray_dir * t;
+    pcl::PointXYZ point(intersection[0], intersection[1], intersection[2]);
+    m_registration_points.push_back(point);
+    cout << "Stored point" << point << endl;
+}
+
 void KinfuResultVisualizer::pointPickCallback(const pcl::visualization::PointPickingEvent& event, void*)
 {
 	float x,y,z;
 	event.getPoint(x, y, z);
-	std::cout << "Point = (" << x << ", " << y << ", " << z << ")" << std::endl;
+	std::cout << "Point = (" << x << ", " << y << ", " << z << ")" << std::endl;    
+	
 	if (!m_pick_enabled) {
 		return;
 	}
@@ -389,8 +537,8 @@ void KinfuResultVisualizer::alignMeshes() {
 	m_original_data.transformMesh(T);
 
 	// Turn off clouds, turn on meshes
-	enableClouds(false);
-	enableMeshes(true);
+	toggleClouds(DATA_ALL, false);
+	toggleMeshes(DATA_ALL, true);
 }
 
 void KinfuResultVisualizer::estimatePlaneNormal() {
@@ -437,6 +585,18 @@ void KinfuResultVisualizer::estimatePlaneNormal() {
 	m_ground_normal.normal_x = nx;
 	m_ground_normal.normal_y = ny;
 	m_ground_normal.normal_z = nz;
+	
+	Eigen::Vector3f normal(m_ground_normal.normal_x, m_ground_normal.normal_y, m_ground_normal.normal_z);
+	normal.normalize();
+	m_plane_coeff.values.resize(4);
+	m_plane_coeff.values[0] = normal[0];
+	m_plane_coeff.values[1] = normal[1];
+	m_plane_coeff.values[2] = normal[2];
+	pcl::PointXYZ plane_center = m_registration_points[0];
+	Eigen::Vector3f p(plane_center.x, plane_center.y, plane_center.z);
+ 	m_plane_coeff.values[3] = -normal.dot(p);
+ 	m_visualizer.addPlane(m_plane_coeff, p[0], p[1], p[2], "box_plane");
+ 	m_has_plane = true;
 }
 
 void KinfuResultVisualizer::drawLineNormal() {
@@ -529,6 +689,111 @@ void KinfuResultVisualizer::measureNormalDeviation() {
 
 	m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, 0.0, 0.0, 1.0, lines[0].id);
 	m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, 1.0, 0.0, 1.0, lines[1].id);
+}
+
+void PrintNumPy(Eigen::Vector3f& v, char* name) {
+	std::cout << name << " = numpy.array(" << std::endl;
+	std::cout << "[" << v[0] << ", " << v[1] << ", " << v[2] << "]" << std::endl;
+	std::cout << ")" << std::endl;
+}
+
+void PrintNumPy(pcl::PointXYZ& v, char* name) {
+	std::cout << name << " = numpy.array(" << std::endl;
+	std::cout << "[" << v.x << ", " << v.y << ", " << v.z << "]" << std::endl;
+	std::cout << ")" << std::endl;
+}
+
+void KinfuResultVisualizer::measureBoxAngles() {
+	if (m_registration_points.size() != 4) {
+		return;
+	}
+
+	if (m_meshes_enabled[DATA_ORIGINAL] == m_meshes_enabled[DATA_RECTIFIED]) {
+		std::cout << "Exactly ONE mesh must be active to do this operation" << std::endl;
+		return;
+	}
+
+	KinfuResultData& instance = m_meshes_enabled[DATA_ORIGINAL] ? m_original_data : m_rectified_data;
+
+	// Points
+	pcl::PointXYZ A = m_registration_points[0];
+	pcl::PointXYZ B = m_registration_points[1];
+	pcl::PointXYZ C = m_registration_points[2];
+	pcl::PointXYZ D = m_registration_points[3];
+
+    // Constrain to plane
+    
+
+	// Directions
+	Eigen::Vector3f AB(B.x - A.x, B.y - A.y, B.z - A.z);
+	Eigen::Vector3f BC(C.x - B.x, C.y - B.y, C.z - B.z);
+	Eigen::Vector3f CD(D.x - C.x, D.y - C.y, D.z - C.z);
+	Eigen::Vector3f DA(A.x - D.x, A.y - D.y, A.z - D.z);
+
+	Eigen::Vector3f normal(m_ground_normal.normal_x, m_ground_normal.normal_y, m_ground_normal.normal_z);
+
+	// Print vectors
+	PrintNumPy(A, "A");
+	PrintNumPy(B, "B");
+	PrintNumPy(C, "C");
+	PrintNumPy(D, "D");
+	PrintNumPy(AB, "AB");
+	PrintNumPy(BC, "BC");
+	PrintNumPy(CD, "CD");
+	PrintNumPy(DA, "DA");
+
+	double angle_ABC = acos(AB.normalized().dot(BC.normalized()));
+	double angle_BCD = acos(BC.normalized().dot(CD.normalized()));
+
+	std::cout << "Angle ABC (deg): " << RAD2DEG(angle_ABC) << std::endl;
+	std::cout << "Angle BCD (deg): " << RAD2DEG(angle_BCD) << std::endl;
+	std::cout << "Length AB: " << AB.norm() << std::endl;
+	std::cout << "Length BC: " << BC.norm() << std::endl;
+	std::cout << "Length CD: " << CD.norm() << std::endl;
+	std::cout << "Length DA: " << DA.norm() << std::endl;
+
+
+    std::cout << "----- On one CSV line below -----" << std::endl;
+    std::cout << instance.getPrefix() << ", ";
+    std::cout <<  RAD2DEG(angle_ABC) << ", ";
+	std::cout << RAD2DEG(angle_BCD) << ", ";
+	std::cout << AB.norm() << ", ";
+	std::cout << BC.norm() << ", ";
+	std::cout << CD.norm() << ", ";
+	std::cout << DA.norm() << std::endl;
+
+	struct {
+		pcl::PointXYZ p;
+		Eigen::Vector3f n;
+		std::string id;
+	} lines[4] = {
+			{A, AB, instance.getPrefix() + " AB"},
+            {B, BC, instance.getPrefix() + " BC"},
+			{C, CD, instance.getPrefix() + " CD"},
+            {D, DA, instance.getPrefix() + " DA"},
+	};
+
+	pcl::RGB rgb = instance.getBaseColor();
+
+	for (int i=0; i < 4; ++i) {
+		pcl::ModelCoefficients m;
+		m.values.push_back(lines[i].p.x);
+		m.values.push_back(lines[i].p.y);
+		m.values.push_back(lines[i].p.z);
+		m.values.push_back(lines[i].n[0]);
+		m.values.push_back(lines[i].n[1]);
+		m.values.push_back(lines[i].n[2]);
+
+		m_visualizer.removeShape(lines[i].id);
+		m_visualizer.addLine(m, lines[i].id);
+		std::cout << "Adding line " << lines[i].id << std::endl;
+		std::cout << "Coeffs: ";
+		for (int j=0; j < m.values.size(); ++j)
+			std::cout << m.values[j] << "  ";
+		std::cout << std::endl;
+		m_visualizer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_COLOR, rgb.r / 255.0, rgb.g / 255.0, rgb.b / 255.0, lines[i].id);
+
+	}
 }
 
 // --------------
