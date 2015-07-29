@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 2.6 FATAL_ERROR)
 
-project(kinrs_visualizer)
+project(pcl_point_pick)
 
-find_package(PCL 1.7 REQUIRED)
+find_package(PCL REQUIRED)
 #find_package(PCL 1.7 REQUIRED COMPONENTS visualization registration common io console)
 
 #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fopenmp")
@@ -13,5 +13,5 @@ include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-add_executable (kinrs_visualizer kinrs_visualizer.cpp)
-target_link_libraries (kinrs_visualizer ${PCL_LIBRARIES})
+add_executable (pcl_point_pick pcl_point_pick.cpp)
+target_link_libraries (pcl_point_pick ${PCL_LIBRARIES})
