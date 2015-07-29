@@ -23,6 +23,7 @@
 #include <pcl/sample_consensus/model_types.h>
 //#include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/features/normal_3d.h>
+#include <pcl/filters/extract_indices.h>
 
 
 typedef pcl::PointCloud<pcl::PointXYZ> cloud_t;
@@ -297,7 +298,8 @@ void KinfuResultVisualizer::setup() {
 
 void KinfuResultVisualizer::start() {
 	setup();
-	toggleClouds(DATA_ALL, true);
+	toggleClouds(DATA_ALL, false);
+	toggleMeshes(DATA_ALL, true);
 	while (!m_visualizer.wasStopped()) {
 		m_visualizer.spinOnce(100);
 		boost::this_thread::sleep(boost::posix_time::microseconds(100000));
@@ -316,6 +318,7 @@ void KinfuResultVisualizer::setPickEnabled(bool enabled) {
                 // Reset previous picks
                 m_registration_points.clear();
         }
+        cout << "Picking: " << (m_pick_enabled ? "ON" : "OFF") << endl;
 }
 
 
@@ -332,7 +335,7 @@ void KinfuResultVisualizer::keyboardCallback(const pcl::visualization::KeyboardE
 			alignMeshes();
 			setPickEnabled(false); // Cleans up after registration
 			break;
-		case 'p':
+		case 'y':
 			estimatePlaneNormal();
 			setPickEnabled(false);
 			break;
@@ -542,6 +545,14 @@ void KinfuResultVisualizer::alignMeshes() {
 }
 
 void KinfuResultVisualizer::estimatePlaneNormal() {
+
+    if (m_meshes_enabled[DATA_ORIGINAL] == m_meshes_enabled[DATA_RECTIFIED]) {
+		    std::cout << "Exactly ONE mesh must be active to do this operation" << std::endl;
+		    return;
+	    }
+
+	    KinfuResultData& instance = m_meshes_enabled[DATA_ORIGINAL] ? m_original_data : m_rectified_data;
+
 	cloud_ptr_t orig_subcloud(new cloud_t);
 	cloud_ptr_t rect_subcloud(new cloud_t);
 	cloud_t alignedCloud;
@@ -551,7 +562,7 @@ void KinfuResultVisualizer::estimatePlaneNormal() {
 	pcl::KdTreeFLANN<pcl::PointXYZ> rect_kdtree;
 	Eigen::Matrix4f T; // Transform
 
-	double kdtree_search_radius = 0.1; // 1 dm
+	double kdtree_search_radius = 0.1; // 2cm for small box // 1 dm for large box
 
 	if (m_registration_points.size() < 1) {
 		std::cout << "No registration points selected. Can not align meshes." << std::endl;
@@ -559,12 +570,13 @@ void KinfuResultVisualizer::estimatePlaneNormal() {
 	}
 
 	std::cout << "Estimating plane from " << m_registration_points.size() << " reference points" << std::endl;
-	// Get cloud from rectified mesh
+	// Get cloud from current mesh
 	cloud_t tmp_cloud;
-	pcl::fromROSMsg(m_rectified_data.getTransformedMesh()->cloud, tmp_cloud);
+	pcl::fromROSMsg(instance.getTransformedMesh()->cloud, tmp_cloud);
 
 	rect_kdtree.setInputCloud(tmp_cloud.makeShared());
-	std::vector<int> indiceList;
+	//std::vector<int> indiceList;
+	pcl::PointIndices::Ptr indices(new pcl::PointIndices());
 	for (int i=0; i < m_registration_points.size(); ++i) {
 		pcl::PointXYZ searchPoint = m_registration_points[i];
 		std::cout << "Point #" << i << ": " << searchPoint << std::endl;
@@ -572,14 +584,41 @@ void KinfuResultVisualizer::estimatePlaneNormal() {
 		std::vector<int> _indiceList;
 		std::vector<float> distanceList;
 		rect_kdtree.radiusSearch(searchPoint, kdtree_search_radius, _indiceList, distanceList);
-		std::cout << "\t Found " << _indiceList.size() << " points in rectified cloud." <<std::endl;
-		indiceList.insert(indiceList.begin(), _indiceList.begin(), _indiceList.end());
+		//std::cout << "\t Found " << _indiceList.size() << " points in rectified cloud." <<std::endl;
+		//indiceList.insert(indiceList.begin(), _indiceList.begin(), _indiceList.end());
+		indices->indices.insert(indices->indices.begin(), _indiceList.begin(), _indiceList.end());
 	}
 
+    pcl::PointXYZ plane_center = m_registration_points[0];
+	Eigen::Vector3f p(plane_center.x, plane_center.y, plane_center.z);
+	
+    m_plane_coeff.values.resize(4);
+#ifndef USE_NORMAL_ESTIMATION
+    cout << "Estimating plane using RANSAC" << endl;
+	cloud_t ransac_cloud;
+	pcl::ExtractIndices<pcl::PointXYZ> eifilter(true);
+	eifilter.setInputCloud(tmp_cloud.makeShared());
+	eifilter.setIndices(indices);
+	eifilter.filter(ransac_cloud);
+	
+	pcl::SampleConsensusModelPlane<pcl::PointXYZ>::Ptr plane_model(new pcl::SampleConsensusModelPlane<pcl::PointXYZ>(ransac_cloud.makeShared()));
+	pcl::RandomSampleConsensus<pcl::PointXYZ> ransac(plane_model);
+	ransac.setDistanceThreshold(0.01);
+	ransac.computeModel();
+	Eigen::VectorXf ransac_plane_coeff;
+	ransac.getModelCoefficients(ransac_plane_coeff);
+    pcl::ModelCoefficients rpcf;
+    m_plane_coeff.values[0] = ransac_plane_coeff[0];
+    m_plane_coeff.values[1] = ransac_plane_coeff[1];
+    m_plane_coeff.values[2] = ransac_plane_coeff[2];
+    m_plane_coeff.values[3] = ransac_plane_coeff[3];
+#else
+    cout << "Estimating plane using normal estimation" << endl;
 	pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normalEstimation;
 	float nx, ny, nz, curvature;
-	std::cout << "Computing normal from " << indiceList.size() << " points." << std::endl;
-	normalEstimation.computePointNormal(tmp_cloud, indiceList, nx, ny, nz, curvature);
+	//std::cout << "Computing normal from " << indiceList.size() << " points." << std::endl;
+	//normalEstimation.computePointNormal(tmp_cloud, indiceList, nx, ny, nz, curvature);
+	normalEstimation.computePointNormal(tmp_cloud, indices->indices, nx, ny, nz, curvature);
 	std::cout << "Plane normal: (" << nx << ", " << ny << ", " << nz << ") with curvature " << curvature << std::endl;
 
 	m_ground_normal.normal_x = nx;
@@ -588,15 +627,14 @@ void KinfuResultVisualizer::estimatePlaneNormal() {
 	
 	Eigen::Vector3f normal(m_ground_normal.normal_x, m_ground_normal.normal_y, m_ground_normal.normal_z);
 	normal.normalize();
-	m_plane_coeff.values.resize(4);
 	m_plane_coeff.values[0] = normal[0];
 	m_plane_coeff.values[1] = normal[1];
 	m_plane_coeff.values[2] = normal[2];
-	pcl::PointXYZ plane_center = m_registration_points[0];
-	Eigen::Vector3f p(plane_center.x, plane_center.y, plane_center.z);
  	m_plane_coeff.values[3] = -normal.dot(p);
- 	m_visualizer.addPlane(m_plane_coeff, p[0], p[1], p[2], "box_plane");
+#endif
  	m_has_plane = true;
+ 	m_visualizer.addPlane(m_plane_coeff, p[0], p[1], p[2], "box_plane");
+ 	cout << "Got plane from " << instance.getPrefix() << endl;
 }
 
 void KinfuResultVisualizer::drawLineNormal() {
